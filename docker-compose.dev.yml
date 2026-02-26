@@ -1,0 +1,63 @@
+version: "3.9"
+
+services:
+  finserv-overlay:
+    build:
+      context: .
+      target: runtime
+    image: aumos/finserv-overlay:dev
+    ports:
+      - "8000:8000"
+    environment:
+      - AUMOS_FINSERV_DATABASE__HOST=postgres
+      - AUMOS_FINSERV_DATABASE__PORT=5432
+      - AUMOS_FINSERV_DATABASE__NAME=aumos_finserv
+      - AUMOS_FINSERV_DATABASE__USER=aumos
+      - AUMOS_FINSERV_DATABASE__PASSWORD=aumos_dev
+      - AUMOS_FINSERV_KAFKA__BOOTSTRAP_SERVERS=kafka:9092
+      - AUMOS_FINSERV_DEBUG=true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
+    volumes:
+      - ./src:/app/src:ro
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: aumos_finserv
+      POSTGRES_USER: aumos
+      POSTGRES_PASSWORD: aumos_dev
+    ports:
+      - "5437:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aumos -d aumos_finserv"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - finserv_postgres_data:/var/lib/postgresql/data
+
+  kafka:
+    image: confluentinc/cp-kafka:7.6.0
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      CLUSTER_ID: aumos-finserv-dev
+    ports:
+      - "9097:9092"
+    healthcheck:
+      test: ["CMD-SHELL", "kafka-topics --bootstrap-server localhost:9092 --list"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  finserv_postgres_data:
