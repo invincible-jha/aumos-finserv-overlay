@@ -14,6 +14,13 @@ from aumos_common.events import EventPublisher
 from aumos_common.observability import get_logger
 from aumos_common.pagination import PageRequest, PageResponse
 
+from aumos_finserv_overlay.adapters.aml_checker import AMLChecker
+from aumos_finserv_overlay.adapters.credit_risk_synth import CreditRiskSynthesizer
+from aumos_finserv_overlay.adapters.dora_compliance import DORAComplianceAdapter
+from aumos_finserv_overlay.adapters.fips_validator import FIPSValidator
+from aumos_finserv_overlay.adapters.fraud_pattern_generator import FraudPatternGenerator
+from aumos_finserv_overlay.adapters.model_risk_manager import ModelRiskManager
+from aumos_finserv_overlay.adapters.pci_dss_checker import PCIDSSChecker
 from aumos_finserv_overlay.adapters.repositories import (
     DORARepository,
     ModelRiskRepository,
@@ -23,6 +30,7 @@ from aumos_finserv_overlay.adapters.repositories import (
     SyntheticTransactionRepository,
 )
 from aumos_finserv_overlay.adapters.report_generator import ReportGenerator
+from aumos_finserv_overlay.adapters.sox_compliance import SOXComplianceAdapter
 from aumos_finserv_overlay.adapters.transaction_generator import TransactionGenerator
 from aumos_finserv_overlay.api.schemas import (
     DORAResilienceStatus,
@@ -1123,3 +1131,298 @@ class RegulatoryReportService:
                 error=str(exc),
             )
             raise
+
+
+class FinServComplianceToolsService:
+    """Service aggregating all financial services compliance domain tools.
+
+    Provides unified access to SOX compliance, SR 11-7 model risk management,
+    PCI DSS checking, DORA compliance, credit risk synthesis, fraud pattern
+    generation, AML checking, and FIPS validation as domain logic tools.
+
+    All underlying adapters are stateless computation tools that perform
+    domain-specific financial compliance analysis without database access.
+    They complement the data-persisting services (SOXComplianceService,
+    ModelRiskService, etc.) by providing deeper domain analysis capabilities.
+
+    Args:
+        event_publisher: Kafka event publisher for compliance tool events.
+        settings: Service settings including thresholds and configuration.
+    """
+
+    def __init__(
+        self,
+        event_publisher: EventPublisher,
+        settings: Any,
+    ) -> None:
+        """Initialize compliance tools service with all domain adapters.
+
+        Args:
+            event_publisher: Kafka event publisher.
+            settings: Service settings instance.
+        """
+        self._publisher = event_publisher
+        self._settings = settings
+        self.sox_compliance = SOXComplianceAdapter()
+        self.model_risk_manager = ModelRiskManager()
+        self.pci_dss_checker = PCIDSSChecker()
+        self.dora_compliance = DORAComplianceAdapter()
+        self.credit_risk_synth = CreditRiskSynthesizer()
+        self.fraud_pattern_generator = FraudPatternGenerator()
+        self.aml_checker = AMLChecker()
+        self.fips_validator = FIPSValidator()
+
+    def generate_sox_management_assertion(
+        self,
+        control_results: list[dict],
+        reporting_period_start: str,
+        reporting_period_end: str,
+        entity_name: str,
+        tenant_id: uuid.UUID,
+    ) -> dict:
+        """Generate a SOX Section 404 management assertion from control results.
+
+        Produces a PCAOB-aligned management assertion document summarizing
+        the effectiveness of internal controls over financial reporting.
+
+        Args:
+            control_results: List of control effectiveness test results.
+            reporting_period_start: Period start date (ISO 8601).
+            reporting_period_end: Period end date (ISO 8601).
+            entity_name: Registered entity name.
+            tenant_id: Tenant requesting the assertion.
+
+        Returns:
+            Dictionary with management assertion text, deficiency summary,
+            and attestation readiness indicator.
+        """
+        result = self.sox_compliance.generate_management_assertion(
+            control_results=control_results,
+            reporting_period_start=reporting_period_start,
+            reporting_period_end=reporting_period_end,
+            entity_name=entity_name,
+        )
+        logger.info(
+            "SOX management assertion generated",
+            tenant_id=str(tenant_id),
+            entity_name=entity_name,
+            total_controls=len(control_results),
+            attestation_ready=result.get("attestation_ready"),
+        )
+        return result
+
+    def perform_pci_deep_scan(
+        self,
+        encryption_config: dict,
+        access_control_config: dict,
+        network_config: dict,
+        data_samples: list[str],
+        entity_name: str,
+        tenant_id: uuid.UUID,
+    ) -> dict:
+        """Perform a deep PCI DSS v4.0 compliance scan with domain analysis.
+
+        Executes encryption validation, access control verification, network
+        segmentation checks, and cardholder data detection using domain
+        adapter logic beyond the basic API-level scan.
+
+        Args:
+            encryption_config: Encryption configuration details.
+            access_control_config: Access control settings.
+            network_config: Network segmentation configuration.
+            data_samples: Sample data strings to scan for PAN presence.
+            entity_name: Entity requesting the scan.
+            tenant_id: Tenant requesting the scan.
+
+        Returns:
+            Dictionary with aggregated scan results from all PCI domain checks.
+        """
+        cardholder_detection = self.pci_dss_checker.detect_cardholder_data(
+            data_samples=data_samples,
+            scan_context=f"deep_scan:{entity_name}",
+        )
+        encryption_validation = self.pci_dss_checker.validate_encryption(encryption_config)
+        access_verification = self.pci_dss_checker.verify_access_controls(access_control_config)
+        network_check = self.pci_dss_checker.check_network_segmentation(network_config)
+
+        all_results = [
+            cardholder_detection,
+            encryption_validation,
+            access_verification,
+            network_check,
+        ]
+        overall_compliant = all(r.get("compliant", False) for r in all_results)
+
+        report = self.pci_dss_checker.generate_pci_compliance_report(
+            scan_results=all_results,
+            entity_name=entity_name,
+            assessment_date=datetime.now(timezone.utc).date().isoformat(),
+        )
+
+        logger.info(
+            "PCI DSS deep scan completed",
+            tenant_id=str(tenant_id),
+            entity_name=entity_name,
+            overall_compliant=overall_compliant,
+            pan_detected=cardholder_detection.get("pan_detected", False),
+        )
+        return {
+            "overall_compliant": overall_compliant,
+            "cardholder_data_detection": cardholder_detection,
+            "encryption_validation": encryption_validation,
+            "access_control_verification": access_verification,
+            "network_segmentation_check": network_check,
+            "compliance_report": report,
+        }
+
+    def analyze_dora_compliance_gaps(
+        self,
+        ict_inventory: list[dict],
+        incident_config: dict,
+        third_party_providers: list[dict],
+        entity_type: str,
+        tenant_id: uuid.UUID,
+    ) -> dict:
+        """Perform a comprehensive DORA compliance gap analysis.
+
+        Assesses ICT risk management, incident reporting readiness, and
+        third-party risk across all DORA article requirements.
+
+        Args:
+            ict_inventory: List of ICT system inventory records.
+            incident_config: Incident reporting configuration.
+            third_party_providers: List of ICT third-party provider records.
+            entity_type: Entity classification (significant/standard).
+            tenant_id: Tenant requesting the analysis.
+
+        Returns:
+            Dictionary with DORA gap analysis across all pillars.
+        """
+        risk_assessment = self.dora_compliance.assess_ict_risk_management(
+            ict_inventory=ict_inventory,
+            risk_tolerance="standard",
+        )
+        incident_check = self.dora_compliance.check_incident_reporting(
+            incident_config=incident_config,
+            entity_type=entity_type,
+        )
+        third_party_risk = self.dora_compliance.assess_third_party_risk(
+            third_party_providers=third_party_providers,
+            entity_classification=entity_type,
+        )
+        combined_results = {
+            "ict_risk": risk_assessment,
+            "incident_reporting": incident_check,
+            "third_party_risk": third_party_risk,
+        }
+        gap_analysis = self.dora_compliance.analyze_compliance_gaps(
+            assessment_results=combined_results,
+            entity_type=entity_type,
+        )
+
+        logger.info(
+            "DORA compliance gap analysis completed",
+            tenant_id=str(tenant_id),
+            entity_type=entity_type,
+            overall_compliant=gap_analysis.get("overall_compliant"),
+            gap_count=gap_analysis.get("total_gaps", 0),
+        )
+        return gap_analysis
+
+    def analyze_aml_transactions(
+        self,
+        transactions: list[dict],
+        customer_id: str,
+        lookback_days: int,
+        tenant_id: uuid.UUID,
+    ) -> dict:
+        """Analyze transactions for AML red-flag typologies.
+
+        Runs BSA/AML transaction pattern analysis, typology matching,
+        and SAR/CTR filing guidance per FATF and FinCEN requirements.
+
+        Args:
+            transactions: List of transaction dictionaries.
+            customer_id: Customer identifier for pattern correlation.
+            lookback_days: Analysis lookback window in days.
+            tenant_id: Tenant requesting the analysis.
+
+        Returns:
+            Dictionary with risk flags, typology matches, and filing guidance.
+        """
+        analysis = self.aml_checker.analyze_transaction_patterns(
+            transactions=transactions,
+            customer_id=customer_id,
+            lookback_days=lookback_days,
+        )
+        typologies = self.aml_checker.match_typologies(analysis)
+
+        logger.info(
+            "AML transaction analysis completed",
+            tenant_id=str(tenant_id),
+            customer_id_hash=customer_id[:8],
+            transactions_analyzed=len(transactions),
+            risk_level=analysis.get("risk_classification", {}).get("risk_level"),
+            sar_recommended=analysis.get("sar_recommended", False),
+        )
+        return {
+            "transaction_analysis": analysis,
+            "typology_matches": typologies,
+        }
+
+    def validate_fips_compliance(
+        self,
+        algorithms_in_use: list[str],
+        key_configurations: list[dict],
+        rng_implementations: list[str],
+        tenant_id: uuid.UUID,
+    ) -> dict:
+        """Validate cryptographic implementation FIPS 140-2 compliance.
+
+        Checks algorithms, key lengths, and RNG implementations against
+        NIST SP 800-131A Rev 2 approved algorithm list.
+
+        Args:
+            algorithms_in_use: List of algorithm names in use.
+            key_configurations: List of key configuration dicts with
+                algorithm and key_length fields.
+            rng_implementations: List of RNG implementation identifiers.
+            tenant_id: Tenant requesting the validation.
+
+        Returns:
+            Dictionary with compliance status across all FIPS checks.
+        """
+        algorithm_check = self.fips_validator.verify_algorithms(algorithms_in_use)
+        key_check = self.fips_validator.validate_key_lengths(key_configurations)
+        rng_check = self.fips_validator.check_rng_compliance(rng_implementations)
+
+        overall_compliant = (
+            algorithm_check.get("fully_compliant", False)
+            and key_check.get("all_compliant", False)
+            and rng_check.get("all_compliant", False)
+        )
+
+        logger.info(
+            "FIPS compliance validation completed",
+            tenant_id=str(tenant_id),
+            algorithms_checked=len(algorithms_in_use),
+            keys_checked=len(key_configurations),
+            overall_compliant=overall_compliant,
+        )
+        return {
+            "overall_fips_compliant": overall_compliant,
+            "algorithm_validation": algorithm_check,
+            "key_length_validation": key_check,
+            "rng_compliance": rng_check,
+        }
+
+
+__all__ = [
+    "SOXComplianceService",
+    "ModelRiskService",
+    "PCIDSSService",
+    "DORAService",
+    "SyntheticTransactionService",
+    "RegulatoryReportService",
+    "FinServComplianceToolsService",
+]
