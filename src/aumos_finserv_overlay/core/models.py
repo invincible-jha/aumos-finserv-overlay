@@ -4,12 +4,15 @@ All models use the `fsv_` table prefix and extend AumOSModel for
 standard tenant isolation, timestamps, and UUID primary keys.
 """
 
+import enum
 import uuid
+from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, ForeignKey, Integer, Numeric, String, Text
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy import Enum as SAEnum
 
 from aumos_common.database import AumOSModel
 
@@ -485,4 +488,128 @@ class RegulatoryReport(AumOSModel):
         nullable=False,
         default=dict,
         name="metadata",
+    )
+
+
+# ---------------------------------------------------------------------------
+# GAP-292: AML Alerts (Real-time transaction monitoring)
+# ---------------------------------------------------------------------------
+
+
+class AMLSeverity(str, enum.Enum):
+    """AML alert severity levels per FATF/BSA risk framework."""
+
+    NONE = "none"
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
+    CRITICAL = "critical"
+
+
+class AMLAlert(AumOSModel):
+    """Real-time AML alert raised by the transaction monitor.
+
+    Stores flagged transaction records for SAR filing workflow.
+    Indexed for high-throughput alert querying by compliance teams.
+
+    Table: fsv_aml_alerts
+    """
+
+    __tablename__ = "fsv_aml_alerts"
+
+    transaction_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), nullable=False, index=True
+    )
+    risk_score: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False)
+    severity: Mapped[str] = mapped_column(
+        String(20),
+        nullable=False,
+        index=True,
+        comment="none | low | medium | high | critical",
+    )
+    reasons: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    reviewer_user_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True), nullable=True)
+    sar_filed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+# ---------------------------------------------------------------------------
+# GAP-293: Regulatory Updates
+# ---------------------------------------------------------------------------
+
+
+class RegulatoryUpdate(AumOSModel):
+    """Regulatory change tracked from public regulator RSS/Atom feeds.
+
+    Stores classified regulatory documents from SEC, FINRA, OCC, CFPB, FRB.
+    Hash-based deduplication prevents duplicate records on re-poll.
+
+    Table: fsv_regulatory_updates
+    """
+
+    __tablename__ = "fsv_regulatory_updates"
+
+    regulator: Mapped[str] = mapped_column(String(20), nullable=False, index=True)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    url: Mapped[str] = mapped_column(Text, nullable=False)
+    published_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False, unique=True)
+    affected_domains: Mapped[list] = mapped_column(
+        JSONB, nullable=False, default=list,
+        comment="Compliance domains affected: SOX, SR_11_7, PCI_DSS, DORA, SEC_AI, AML"
+    )
+    reviewed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+
+# ---------------------------------------------------------------------------
+# GAP-295: Basel III/IV Capital Adequacy Assessments
+# ---------------------------------------------------------------------------
+
+
+class BaselAssessment(AumOSModel):
+    """Basel III/IV portfolio RWA assessment record.
+
+    Stores aggregate RWA computation results for a portfolio of credit exposures.
+    Individual exposure results are stored as JSONB for flexibility.
+
+    Table: fsv_basel_assessments
+    """
+
+    __tablename__ = "fsv_basel_assessments"
+
+    portfolio_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    total_rwa_usd: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+    total_capital_requirement_usd: Mapped[Decimal] = mapped_column(Numeric(20, 2), nullable=False)
+    exposure_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    results: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+
+
+# ---------------------------------------------------------------------------
+# GAP-297: SOC2 Type II Evidence
+# ---------------------------------------------------------------------------
+
+
+class SOC2Evidence(AumOSModel):
+    """SOC2 Type II audit evidence record.
+
+    Maps AumOS platform activities to AICPA Trust Services Criteria controls.
+    Cross-references SOX evidence where applicable.
+
+    Table: fsv_soc2_evidence
+    """
+
+    __tablename__ = "fsv_soc2_evidence"
+
+    tsc_control_id: Mapped[str] = mapped_column(
+        String(20), nullable=False, index=True,
+        comment="AICPA TSC control ID e.g. CC6.1, CC7.2"
+    )
+    tsc_category: Mapped[str] = mapped_column(String(50), nullable=False)
+    evidence_type: Mapped[str] = mapped_column(String(50), nullable=False)
+    evidence_payload: Mapped[dict] = mapped_column(JSONB, nullable=False, default=dict)
+    audit_period_start: Mapped[str] = mapped_column(String(20), nullable=False)
+    audit_period_end: Mapped[str] = mapped_column(String(20), nullable=False)
+    sox_evidence_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True,
+        comment="Cross-reference to fsv_sox_evidence"
     )
